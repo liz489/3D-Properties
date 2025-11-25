@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>3D Shapes Explorer — Faces / Edges / Vertices</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial}
+    #app{display:grid;grid-template-columns:1fr 300px;height:100vh}
+    canvas{width:100%;height:100%;display:block}
+    .panel{padding:12px;background:#f7f7f7;border-left:1px solid #e3e3e3;overflow:auto}
+    h2{margin:6px 0 12px;font-size:18px}
+    button, select{display:block;margin:8px 0;padding:8px;width:100%;font-size:14px}
+    .counts{margin-top:12px;padding:10px;background:#fff;border-radius:6px;border:1px solid #e9e9e9}
+    .hint{font-size:13px;color:#666}
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="stage"></div>
+    <div class="panel">
+      <h2>Simple 3D Shapes Explorer</h2>
+      <label>Choose a shape:</label>
+      <select id="shapeSelect">
+        <option value="rectPrism">Rectangular Prism</option>
+        <option value="cube">Cube</option>
+        <option value="sphere">Sphere</option>
+        <option value="cone">Cone</option>
+        <option value="cylinder">Cylinder</option>
+        <option value="squarePyramid">Square Based Pyramid</option>
+        <option value="triPyramid">Triangular Pyramid</option>
+        <option value="triPrism">Triangular Prism</option>
+      </select>
+
+      <button id="resetView">Reset view</button>
+      
+      <hr style="margin:16px 0;border:none;border-top:1px solid #ddd">
+      
+      <h3 style="margin:12px 0 8px;font-size:16px">Interactive Counting</h3>
+      <button id="countFaces" style="background:#2196F3;color:white;font-weight:bold">Count Faces</button>
+      <button id="countEdges" style="background:#FF9800;color:white;font-weight:bold">Count Edges</button>
+      <button id="countVertices" style="background:#9C27B0;color:white;font-weight:bold">Count Vertices</button>
+      <button id="stopCounting" style="background:#757575;color:white;margin-top:8px">Stop Counting</button>
+      <button id="resetCounts" style="background:#f44336;color:white">Reset My Counts</button>
+
+      <div class="counts" style="margin-top:16px">
+        <div style="margin-bottom:8px"><strong>Your Counts:</strong></div>
+        <div><strong>Faces:</strong> <span id="userFacesCount">0</span></div>
+        <div><strong>Edges:</strong> <span id="userEdgesCount">0</span></div>
+        <div><strong>Vertices:</strong> <span id="userVertsCount">0</span></div>
+      </div>
+
+      <p class="hint">Tip: rotate with mouse drag, zoom with scroll. Click a counting button to start counting that type, then click on the shape to count!</p>
+    </div>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.154.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    (function init() {
+      var container = document.getElementById('stage');
+      if (!container) return;
+
+      var scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xffffff);
+
+      var renderer = new THREE.WebGLRenderer({antialias:true});
+      renderer.setSize(container.clientWidth, container.clientHeight);
+      container.appendChild(renderer.domElement);
+
+      var camera = new THREE.PerspectiveCamera(45, container.clientWidth/container.clientHeight, 0.1, 1000);
+      camera.position.set(3,3,6);
+
+      var controls = new OrbitControls(camera, renderer.domElement);
+      controls.enableDamping = true;
+
+      var light = new THREE.DirectionalLight(0xffffff, 0.9);
+      light.position.set(5,10,7);
+      scene.add(light);
+      scene.add(new THREE.AmbientLight(0x888888));
+
+      window.addEventListener('resize', function(){
+        renderer.setSize(container.clientWidth, container.clientHeight);
+        camera.aspect = container.clientWidth/container.clientHeight;
+        camera.updateProjectionMatrix();
+      });
+
+      // Variables
+      var current = null;
+      var countingMode = null; // 'faces', 'edges', 'vertices', or null
+      var countedFaces = new Set();
+      var countedEdges = new Set();
+      var countedVerts = new Set();
+
+      var faceMaterial = new THREE.MeshStandardMaterial({color:0x8fbcd4, transparent:true, opacity:0.95, flatShading:true});
+      var edgeMaterial = new THREE.LineBasicMaterial({color:0x333333});
+      var highlightMaterial = new THREE.MeshStandardMaterial({color:0xffcc66});
+      var countedMaterial = new THREE.MeshStandardMaterial({color:0x2196F3, transparent:true, opacity:0.7}); // Blue for faces
+      var countedEdgeMaterial = new THREE.LineBasicMaterial({color:0xFF9800, linewidth:3}); // Orange for edges
+      var countedVertMaterial = new THREE.MeshStandardMaterial({color:0x9C27B0, metalness:0.3, roughness:0.6}); // Purple for vertices
+
+      function clearCurrent(){
+        if(!current) return;
+        if(current._countedOverlays){
+          current._countedOverlays.forEach(o=>{
+            scene.remove(o);
+            if(o.geometry) o.geometry.dispose();
+            if(o.material) o.material.dispose();
+          });
+        }
+        current.group.traverse(c=>{ if(c.geometry) c.geometry.dispose(); if(c.material) c.material.dispose(); });
+        scene.remove(current.group);
+        current = null;
+      }
+
+      function makeShape(type){
+        clearCurrent();
+        countedFaces.clear(); countedEdges.clear(); countedVerts.clear();
+        countingMode = null;
+        updateUserCounts();
+        updateCountingButtons();
+
+        var g = new THREE.Group();
+        var mesh;
+
+        // Create the mesh based on type
+        if(type==='rectPrism'){
+          mesh = new THREE.Mesh(new THREE.BoxGeometry(2,1.2,1), faceMaterial.clone());
+        } else if(type==='cube'){
+          mesh = new THREE.Mesh(new THREE.BoxGeometry(2,2,2), faceMaterial.clone());
+        } else if(type==='sphere'){
+          mesh = new THREE.Mesh(new THREE.IcosahedronGeometry(1.4,0), faceMaterial.clone());
+        } else if(type==='cone'){
+          mesh = new THREE.Mesh(new THREE.ConeGeometry(1.2,1.8,8), faceMaterial.clone());
+        } else if(type==='cylinder'){
+          mesh = new THREE.Mesh(new THREE.CylinderGeometry(1.0,1.0,1.6,8), faceMaterial.clone());
+        } else if(type==='squarePyramid'){
+          mesh = new THREE.Mesh(new THREE.ConeGeometry(1.2,1.8,4), faceMaterial.clone()); 
+          mesh.rotation.y=Math.PI/4;
+        } else if(type==='triPyramid'){
+          mesh = new THREE.Mesh(new THREE.TetrahedronGeometry(1.4), faceMaterial.clone());
+        } else if(type==='triPrism'){
+          var shape = new THREE.Shape();
+          shape.moveTo(-1,-0.6); shape.lineTo(1,-0.6); shape.lineTo(0,0.8); shape.closePath();
+          var extrude = new THREE.ExtrudeGeometry(shape, {depth:1.6, bevelEnabled:false});
+          mesh = new THREE.Mesh(extrude, faceMaterial.clone());
+          mesh.rotation.x=Math.PI/2;
+        }
+        g.add(mesh);
+
+        // --- Edges ---
+        var edges = new THREE.EdgesGeometry(mesh.geometry);
+        var edgePositions = edges.attributes.position.array;
+
+        var edgeGroup = new THREE.Group();
+        var edgeLines = [];
+        var edgeHelpers = [];
+
+        for(var i=0; i<edgePositions.length; i+=6){
+          var start = new THREE.Vector3(edgePositions[i], edgePositions[i+1], edgePositions[i+2]);
+          var end   = new THREE.Vector3(edgePositions[i+3], edgePositions[i+4], edgePositions[i+5]);
+          var edgeIdx = edgeLines.length;
+
+          // Actual line
+          var edgeGeom = new THREE.BufferGeometry().setFromPoints([start,end]);
+          var line = new THREE.Line(edgeGeom, edgeMaterial.clone());
+          line.userData.edgeIndex = edgeIdx;
+          edgeLines.push(line);
+          edgeGroup.add(line);
+
+          // Invisible helper
+          var dir = new THREE.Vector3().subVectors(end,start);
+          var length = dir.length();
+          dir.normalize();
+          var helper = new THREE.Mesh(
+            new THREE.CylinderGeometry(0.04,0.04,length,8),
+            new THREE.MeshBasicMaterial({visible:false})
+          );
+          helper.position.copy(start).add(end).multiplyScalar(0.5);
+          helper.lookAt(end);
+          helper.rotateX(Math.PI/2);
+          helper.userData.edgeIndex = edgeIdx;
+          edgeHelpers.push(helper);
+          edgeGroup.add(helper);
+        }
+        g.add(edgeGroup);
+
+        // --- Vertices ---
+        var verts = mesh.geometry.attributes.position;
+        var vertArray = verts.array;
+        var vertSet = [];
+        for(var i=0;i<vertArray.length;i+=3) vertSet.push(new THREE.Vector3(vertArray[i],vertArray[i+1],vertArray[i+2]));
+        var unique = [];
+        vertSet.forEach(v=>{ if(!unique.some(u=>u.distanceToSquared(v)<1e-6)) unique.push(v); });
+        var vertGroup = new THREE.Group();
+        var vertObjects = [];
+        unique.forEach((v,idx)=>{
+          var s = new THREE.Mesh(new THREE.SphereGeometry(0.06,8,8), new THREE.MeshStandardMaterial({metalness:0.3, roughness:0.6}));
+          s.position.copy(v);
+          s.userData.vertIndex = idx;
+          vertObjects.push(s);
+          vertGroup.add(s);
+        });
+        g.add(vertGroup);
+
+        scene.add(g);
+        current = {group:g, mesh:mesh, edgeGroup:edgeGroup, edgeLines:edgeLines, edgeHelpers:edgeHelpers, vertObjects:vertObjects};
+      }
+
+      function updateUserCounts(){
+        document.getElementById('userFacesCount').textContent = countedFaces.size;
+        document.getElementById('userEdgesCount').textContent = countedEdges.size;
+        document.getElementById('userVertsCount').textContent = countedVerts.size;
+      }
+
+      // --- Click Handling ---
+      var raycaster = new THREE.Raycaster();
+      var mouse = new THREE.Vector2();
+
+      function onClick(e){
+        if(!current) return;
+        var rect=renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX-rect.left)/rect.width)*2 - 1;
+        mouse.y = -((e.clientY-rect.top)/rect.height)*2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+
+        if(countingMode === 'edges'){
+          var hits = raycaster.intersectObjects(current.edgeHelpers, true);
+          if(hits.length>0){
+            var edgeIdx = hits[0].object.userData.edgeIndex;
+            if(!countedEdges.has(edgeIdx)){
+              countedEdges.add(edgeIdx);
+              current.edgeLines[edgeIdx].material = countedEdgeMaterial.clone();
+              updateUserCounts();
+            }
+          }
+        } else if(countingMode === 'vertices'){
+          var hits = raycaster.intersectObjects(current.vertObjects,true);
+          if(hits.length>0){
+            var vertIdx = hits[0].object.userData.vertIndex;
+            if(!countedVerts.has(vertIdx)){
+              countedVerts.add(vertIdx);
+              hits[0].object.material = countedVertMaterial.clone();
+              updateUserCounts();
+            }
+          }
+        }
+      }
+      renderer.domElement.addEventListener('click', onClick);
+
+      document.getElementById('shapeSelect').addEventListener('change', e=>makeShape(e.target.value));
+      document.getElementById('resetView').addEventListener('click', ()=>{
+        controls.reset(); camera.position.set(3,3,6);
+      });
+
+      function updateCountingButtons(){
+        document.getElementById('countFaces').style.opacity = countingMode==='faces'?'1':'0.6';
+        document.getElementById('countEdges').style.opacity = countingMode==='edges'?'1':'0.6';
+        document.getElementById('countVertices').style.opacity = countingMode==='vertices'?'1':'0.6';
+      }
+
+      document.getElementById('countFaces').addEventListener('click', ()=>{
+        countingMode='faces'; updateCountingButtons();
+      });
+      document.getElementById('countEdges').addEventListener('click', ()=>{
+        countingMode='edges'; updateCountingButtons();
+      });
+      document.getElementById('countVertices').addEventListener('click', ()=>{
+        countingMode='vertices'; updateCountingButtons();
+      });
+      document.getElementById('stopCounting').addEventListener('click', ()=>{
+        countingMode=null; updateCountingButtons();
+      });
+      document.getElementById('resetCounts').addEventListener('click', ()=>{
+        countedFaces.clear(); countedEdges.clear(); countedVerts.clear(); updateUserCounts();
+        if(current){
+          current.edgeLines.forEach(e=>e.material=edgeMaterial.clone());
+          current.vertObjects.forEach(v=>{
+            v.material = new THREE.MeshStandardMaterial({metalness:0.3,roughness:0.6});
+          });
+        }
+      });
+
+      makeShape('rectPrism');
+      updateCountingButtons();
+
+      function animate(){ requestAnimationFrame(animate); controls.update(); renderer.render(scene,camera); }
+      animate();
+
+    })();
+  </script>
+</body>
+</html>
