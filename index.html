@@ -108,6 +108,10 @@
       var countedEdgeMaterial = new THREE.LineBasicMaterial({color:0xFF9800, linewidth:3}); // Orange for edges
       var countedVertMaterial = new THREE.MeshStandardMaterial({color:0x9C27B0, metalness:0.3, roughness:0.6}); // Purple for vertices
 
+      var faceColors = null; // Float32Array for face vertex colors
+      var faceCountMaterial = null;
+      var faceGroups = []; // groups of triangle faces per logical face
+
       function clearCurrent(){
         if(!current) return;
         if(current._countedOverlays){
@@ -117,7 +121,10 @@
             if(o.material) o.material.dispose();
           });
         }
-        current.group.traverse(c=>{ if(c.geometry) c.geometry.dispose(); if(c.material) c.material.dispose(); });
+        current.group.traverse(c=>{
+          if(c.geometry) c.geometry.dispose();
+          if(c.material) c.material.dispose();
+        });
         scene.remove(current.group);
         current = null;
       }
@@ -155,6 +162,63 @@
           mesh = new THREE.Mesh(extrude, faceMaterial.clone());
           mesh.rotation.x=Math.PI/2;
         }
+
+        // Convert geometry to non-indexed for coloring
+        let geom = mesh.geometry.clone();
+        geom = geom.toNonIndexed();
+
+        // Setup faceGroups depending on shape type
+        faceGroups = [];
+        if(type==='rectPrism' || type==='cube'){
+          // BoxGeometry: 6 faces, each face has 2 triangles
+          // total faces = 12 triangles
+          // group as [[0,1],[2,3],[4,5],[6,7],[8,9],[10,11]]
+          for(let i=0; i<12; i+=2){
+            faceGroups.push([i, i+1]);
+          }
+        } else if(type==='squarePyramid'){
+          // Cone with 4 segments: base and 4 sides
+          // base is 2 triangles, sides 1 triangle each, total 10 triangles
+          // group base as [0,1], sides as [2],[3],[4],[5]
+          faceGroups.push([0,1]);
+          for(let i=2; i<=5; i++) faceGroups.push([i]);
+        } else if(type==='triPyramid'){
+          // Tetrahedron: 4 faces, each 1 triangle
+          for(let i=0; i<4; i++) faceGroups.push([i]);
+        } else if(type==='triPrism'){
+          // Extrude shape has many triangles, no simple grouping
+          // Treat each triangle as its own face
+          let triCount = geom.attributes.position.count / 3;
+          for(let i=0; i<triCount; i++) faceGroups.push([i]);
+        } else if(type==='sphere' || type==='cone' || type==='cylinder'){
+          // Treat each triangle individually
+          let triCount = geom.attributes.position.count / 3;
+          for(let i=0; i<triCount; i++) faceGroups.push([i]);
+        } else {
+          // default: each triangle is a face
+          let triCount = geom.attributes.position.count / 3;
+          for(let i=0; i<triCount; i++) faceGroups.push([i]);
+        }
+
+        // Prepare faceColors array for all vertices
+        var countFaces = geom.attributes.position.count / 3;
+        faceColors = new Float32Array(countFaces * 3 * 3);
+        const defaultColor = new THREE.Color(0x8fbcd4);
+        for(let i=0; i<faceColors.length; i+=3){
+          faceColors[i] = defaultColor.r;
+          faceColors[i+1] = defaultColor.g;
+          faceColors[i+2] = defaultColor.b;
+        }
+        geom.setAttribute('color', new THREE.BufferAttribute(faceColors, 3));
+
+        faceCountMaterial = new THREE.MeshStandardMaterial({
+          vertexColors: true,
+          flatShading: true,
+          transparent: true,
+          opacity: 0.95
+        });
+
+        mesh = new THREE.Mesh(geom, faceCountMaterial);
         g.add(mesh);
 
         // --- Edges ---
@@ -170,14 +234,12 @@
           var end   = new THREE.Vector3(edgePositions[i+3], edgePositions[i+4], edgePositions[i+5]);
           var edgeIdx = edgeLines.length;
 
-          // Actual line
           var edgeGeom = new THREE.BufferGeometry().setFromPoints([start,end]);
           var line = new THREE.Line(edgeGeom, edgeMaterial.clone());
           line.userData.edgeIndex = edgeIdx;
           edgeLines.push(line);
           edgeGroup.add(line);
 
-          // Invisible helper
           var dir = new THREE.Vector3().subVectors(end,start);
           var length = dir.length();
           dir.normalize();
@@ -214,6 +276,8 @@
 
         scene.add(g);
         current = {group:g, mesh:mesh, edgeGroup:edgeGroup, edgeLines:edgeLines, edgeHelpers:edgeHelpers, vertObjects:vertObjects};
+
+        updateUserCounts();
       }
 
       function updateUserCounts(){
@@ -233,7 +297,33 @@
         mouse.y = -((e.clientY-rect.top)/rect.height)*2 + 1;
         raycaster.setFromCamera(mouse, camera);
 
-        if(countingMode === 'edges'){
+        if(countingMode === 'faces'){
+          var hits = raycaster.intersectObject(current.mesh);
+          if(hits.length > 0){
+            var triFaceIndex = hits[0].faceIndex;
+            // Find which faceGroup contains this triangle
+            var groupIndex = -1;
+            for(let i=0; i<faceGroups.length; i++){
+              if(faceGroups[i].includes(triFaceIndex)){
+                groupIndex = i;
+                break;
+              }
+            }
+            if(groupIndex >= 0 && !countedFaces.has(groupIndex)){
+              countedFaces.add(groupIndex);
+              // Highlight all triangles in the group
+              faceGroups[groupIndex].forEach(fi=>{
+                for(let i=fi*9; i<fi*9+9; i+=3){
+                  faceColors[i] = 1.0;    // R yellow highlight
+                  faceColors[i+1] = 0.8;  // G
+                  faceColors[i+2] = 0.4;  // B
+                }
+              });
+              current.mesh.geometry.attributes.color.needsUpdate = true;
+              updateUserCounts();
+            }
+          }
+        } else if(countingMode === 'edges'){
           var hits = raycaster.intersectObjects(current.edgeHelpers, true);
           if(hits.length>0){
             var edgeIdx = hits[0].object.userData.edgeIndex;
@@ -282,7 +372,16 @@
       });
       document.getElementById('resetCounts').addEventListener('click', ()=>{
         countedFaces.clear(); countedEdges.clear(); countedVerts.clear(); updateUserCounts();
+
         if(current){
+          const defaultColor = new THREE.Color(0x8fbcd4);
+          for(let i=0; i<faceColors.length; i+=3){
+            faceColors[i] = defaultColor.r;
+            faceColors[i+1] = defaultColor.g;
+            faceColors[i+2] = defaultColor.b;
+          }
+          current.mesh.geometry.attributes.color.needsUpdate = true;
+
           current.edgeLines.forEach(e=>e.material=edgeMaterial.clone());
           current.vertObjects.forEach(v=>{
             v.material = new THREE.MeshStandardMaterial({metalness:0.3,roughness:0.6});
